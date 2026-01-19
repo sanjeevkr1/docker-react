@@ -110,17 +110,17 @@ jobs:
 
           echo "Pulling Docker image: $DOCKER_USER/react-app:latest"
 
-          cat > pull-image.json <<'JSON'
+          cat > pull-image.json <<EOF
           { "commands": [
             "#!/bin/bash -xe",
             "set -o pipefail",
-            "cd '"$DEPLOY_PATH"' || { echo 'ERROR: Deploy path not found' >&2; exit 1; }",
+            "cd $DEPLOY_PATH || { echo 'ERROR: Deploy path not found' >&2; exit 1; }",
             "echo 'Pulling Docker image...'",
-            "sudo docker pull '"$DOCKER_USER"'/react-app:latest",
+            "sudo docker pull $DOCKER_USER/react-app:latest",
             "echo 'Image pulled successfully'",
             "sudo docker images | grep react-app"
           ] }
-          JSON
+          EOF
 
           PULL_CMD_ID=$(aws ssm send-command \
             --instance-ids "$ID" \
@@ -153,22 +153,22 @@ jobs:
 
           echo "Deploying application container"
 
-          cat > deploy-app.json <<'JSON'
+          cat > deploy-app.json <<EOF
           { "commands": [
             "#!/bin/bash -xe",
             "set -o pipefail",
-            "cd '"$DEPLOY_PATH"' || exit 1",
+            "cd $DEPLOY_PATH || exit 1",
             "echo 'Stopping existing container...'",
             "sudo docker stop react-app || true",
             "sudo docker rm react-app || true",
             "echo 'Starting new container...'",
-            "sudo docker run -d --name react-app -p 80:80 '"$DOCKER_USER"'/react-app:latest",
+            "sudo docker run -d --name react-app -p 80:80 $DOCKER_USER/react-app:latest",
             "sleep 2",
             "echo 'Container started, checking status...'",
             "sudo docker ps | grep react-app",
             "echo 'Application deployed successfully'"
           ] }
-          JSON
+          EOF
 
           DEPLOY_CMD_ID=$(aws ssm send-command \
             --instance-ids "$ID" \
@@ -199,7 +199,7 @@ jobs:
 
           echo "Running sanity checks on deployed application"
 
-          cat > sanity-check.json <<'JSON'
+          cat > sanity-check.json <<'EOF'
           { "commands": [
             "#!/bin/bash -xe",
             "set -o pipefail",
@@ -226,7 +226,7 @@ jobs:
             "echo 'ERROR: Application did not return HTTP 200 after retries' >&2",
             "exit 1"
           ] }
-          JSON
+          EOF
 
           SANITY_CMD_ID=$(aws ssm send-command \
             --instance-ids "$ID" \
