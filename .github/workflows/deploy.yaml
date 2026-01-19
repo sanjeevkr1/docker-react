@@ -8,7 +8,7 @@ on:
 permissions:
   id-token: write
   contents: read
-  
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -31,6 +31,12 @@ jobs:
           echo "instance_id=$INSTANCE_ID" >> $GITHUB_OUTPUT
           echo "Instance ID: $INSTANCE_ID"
       
+      - name: Verify AWS credentials
+        run: aws sts get-caller-identity
+
+      - name: Test SSM access
+        run: aws ssm describe-document --name AWS-RunShellScript
+        
       - name: Deploy to EC2 via Systems Manager
         run: |
           aws ssm send-command \
