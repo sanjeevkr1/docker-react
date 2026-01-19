@@ -36,53 +36,10 @@ jobs:
           ID=${{ steps.get-instance.outputs.instance_id }}
           echo "Checking Docker installation on instance: $ID"
 
-          cat > check-docker.json <<'JSON'
-          { "commands": [
-            "#!/bin/bash -xe",
-            "set -o pipefail",
-            "if command -v docker >/dev/null 2>&1; then",
-            "  echo 'Docker is already installed'",
-            "  docker version",
-            "  exit 0",
-            "fi",
-            "echo 'Docker not found, installing...'",
-            "if [ -f /etc/os-release ]; then . /etc/os-release; fi",
-            "if echo \"$NAME\" | grep -qi 'amazon linux'; then",
-            "  if command -v amazon-linux-extras >/dev/null 2>&1; then",
-            "    echo 'Installing Docker via amazon-linux-extras (AL2)'",
-            "    sudo amazon-linux-extras install -y docker",
-            "    sudo systemctl enable docker",
-            "    sudo systemctl start docker",
-            "  else",
-            "    echo 'Installing Docker via yum (AL1)'",
-            "    sudo yum install -y docker",
-            "    sudo chkconfig docker on",
-            "    sudo service docker start",
-            "  fi",
-            "elif command -v yum >/dev/null 2>&1; then",
-            "  echo 'Installing Docker via yum'",
-            "  sudo yum install -y docker",
-            "  sudo systemctl enable docker",
-            "  sudo systemctl start docker",
-            "elif command -v apt-get >/dev/null 2>&1; then",
-            "  echo 'Installing Docker via apt-get'",
-            "  sudo apt-get update -y",
-            "  sudo apt-get install -y docker.io",
-            "  sudo systemctl enable --now docker",
-            "else",
-            "  echo 'ERROR: Unsupported distro' >&2",
-            "  exit 1",
-            "fi",
-            "sleep 2",
-            "sudo docker version",
-            "echo 'Docker installation completed successfully'"
-          ] }
-          JSON
-
           DOCKER_CMD_ID=$(aws ssm send-command \
             --instance-ids "$ID" \
             --document-name "AWS-RunShellScript" \
-            --parameters file://check-docker.json \
+            --parameters file://.github/workflows/ssm-commands/check-docker.json \
             --query "Command.CommandId" --output text)
           echo "Docker check/install Command ID: $DOCKER_CMD_ID"
 
@@ -110,22 +67,14 @@ jobs:
 
           echo "Pulling Docker image: $DOCKER_USER/react-app:latest"
 
-          cat > pull-image.json <<EOF
-          { "commands": [
-            "#!/bin/bash -xe",
-            "set -o pipefail",
-            "cd $DEPLOY_PATH || { echo 'ERROR: Deploy path not found' >&2; exit 1; }",
-            "echo 'Pulling Docker image...'",
-            "sudo docker pull $DOCKER_USER/react-app:latest",
-            "echo 'Image pulled successfully'",
-            "sudo docker images | grep react-app"
-          ] }
-          EOF
+          # Substitute variables in the command file
+          sed "s|\${DOCKER_USER}|$DOCKER_USER|g; s|\${DEPLOY_PATH}|$DEPLOY_PATH|g" \
+            .github/workflows/ssm-commands/pull-image.json > /tmp/pull-image-resolved.json
 
           PULL_CMD_ID=$(aws ssm send-command \
             --instance-ids "$ID" \
             --document-name "AWS-RunShellScript" \
-            --parameters file://pull-image.json \
+            --parameters file:///tmp/pull-image-resolved.json \
             --query "Command.CommandId" --output text)
           echo "Pull image Command ID: $PULL_CMD_ID"
 
@@ -153,27 +102,14 @@ jobs:
 
           echo "Deploying application container"
 
-          cat > deploy-app.json <<EOF
-          { "commands": [
-            "#!/bin/bash -xe",
-            "set -o pipefail",
-            "cd $DEPLOY_PATH || exit 1",
-            "echo 'Stopping existing container...'",
-            "sudo docker stop react-app || true",
-            "sudo docker rm react-app || true",
-            "echo 'Starting new container...'",
-            "sudo docker run -d --name react-app -p 80:80 $DOCKER_USER/react-app:latest",
-            "sleep 2",
-            "echo 'Container started, checking status...'",
-            "sudo docker ps | grep react-app",
-            "echo 'Application deployed successfully'"
-          ] }
-          EOF
+          # Substitute variables in the command file
+          sed "s|\${DOCKER_USER}|$DOCKER_USER|g; s|\${DEPLOY_PATH}|$DEPLOY_PATH|g" \
+            .github/workflows/ssm-commands/deploy-app.json > /tmp/deploy-app-resolved.json
 
           DEPLOY_CMD_ID=$(aws ssm send-command \
             --instance-ids "$ID" \
             --document-name "AWS-RunShellScript" \
-            --parameters file://deploy-app.json \
+            --parameters file:///tmp/deploy-app-resolved.json \
             --query "Command.CommandId" --output text)
           echo "Deploy app Command ID: $DEPLOY_CMD_ID"
 
@@ -199,39 +135,10 @@ jobs:
 
           echo "Running sanity checks on deployed application"
 
-          cat > sanity-check.json <<'EOF'
-          { "commands": [
-            "#!/bin/bash -xe",
-            "set -o pipefail",
-            "echo 'Checking if container is running...'",
-            "sudo docker ps | grep react-app || { echo 'ERROR: Container not running' >&2; exit 1; }",
-            "echo 'Container is running'",
-            "echo 'Checking container logs for errors...'",
-            "sudo docker logs react-app | tail -20",
-            "echo 'Attempting HTTP health check...'",
-            "max_attempts=10",
-            "attempt=1",
-            "while [ $attempt -le $max_attempts ]; do",
-            "  echo \"Health check attempt $attempt/$max_attempts\"",
-            "  http_code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:80/ || echo '000')",
-            "  if [ \"$http_code\" = \"200\" ]; then",
-            "    echo \"SUCCESS: Application returned HTTP $http_code\"",
-            "    exit 0",
-            "  else",
-            "    echo \"Got HTTP $http_code, retrying in 2 seconds...\"",
-            "    sleep 2",
-            "    attempt=$((attempt + 1))",
-            "  fi",
-            "done",
-            "echo 'ERROR: Application did not return HTTP 200 after retries' >&2",
-            "exit 1"
-          ] }
-          EOF
-
           SANITY_CMD_ID=$(aws ssm send-command \
             --instance-ids "$ID" \
             --document-name "AWS-RunShellScript" \
-            --parameters file://sanity-check.json \
+            --parameters file://.github/workflows/ssm-commands/sanity-check.json \
             --query "Command.CommandId" --output text)
           echo "Sanity check Command ID: $SANITY_CMD_ID"
 

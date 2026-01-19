@@ -1,0 +1,11 @@
+{
+  "commands": [
+    "#!/bin/bash -xe",
+    "set -o pipefail",
+    "cd ${DEPLOY_PATH} || { echo 'ERROR: Deploy path not found' >&2; exit 1; }",
+    "echo 'Pulling Docker image...'",
+    "sudo docker pull ${DOCKER_USER}/react-app:latest",
+    "echo 'Image pulled successfully'",
+    "sudo docker images | grep react-app"
+  ]
+}

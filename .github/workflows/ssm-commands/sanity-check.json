@@ -1,0 +1,28 @@
+{
+  "commands": [
+    "#!/bin/bash -xe",
+    "set -o pipefail",
+    "echo 'Checking if container is running...'",
+    "sudo docker ps | grep react-app || { echo 'ERROR: Container not running' >&2; exit 1; }",
+    "echo 'Container is running'",
+    "echo 'Checking container logs for errors...'",
+    "sudo docker logs react-app | tail -20",
+    "echo 'Attempting HTTP health check...'",
+    "max_attempts=10",
+    "attempt=1",
+    "while [ $attempt -le $max_attempts ]; do",
+    "  echo \"Health check attempt $attempt/$max_attempts\"",
+    "  http_code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:80/ || echo '000')",
+    "  if [ \"$http_code\" = \"200\" ]; then",
+    "    echo \"SUCCESS: Application returned HTTP $http_code\"",
+    "    exit 0",
+    "  else",
+    "    echo \"Got HTTP $http_code, retrying in 2 seconds...\"",
+    "    sleep 2",
+    "    attempt=$((attempt + 1))",
+    "  fi",
+    "done",
+    "echo 'ERROR: Application did not return HTTP 200 after retries' >&2",
+    "exit 1"
+  ]
+}
