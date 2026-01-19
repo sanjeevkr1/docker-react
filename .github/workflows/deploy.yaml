@@ -1,9 +1,6 @@
 name: Deploy to AWS EC2
 on:
-  workflow_run:
-    workflows: ["Build and Push to Docker Hub"]
-    types:
-      - completed
+  push:
     branches:
       - master
 
