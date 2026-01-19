@@ -14,15 +14,15 @@ jobs:
         run: docker login -u ${{ secrets.DOCKER_USERNAME }} -p ${{ secrets.DOCKER_PASSWORD }}
       
       - name: Build test image
-        run: docker build -t cygnetops/react-test -f Dockerfile.dev .
+        run: docker build -t ${{ secrets.DOCKER_USERNAME }}/react-test -f Dockerfile.dev .
       
       - name: Run tests
-        run: docker run -e CI=true cygnetops/react-test npm test
+        run: docker run -e CI=true ${{ secrets.DOCKER_USERNAME }}/react-test npm test
       
       - name: Build production image
-        run: docker build -t cygnetops/react-app:latest -t cygnetops/react-app:${{ github.sha }} -f Dockerfile .
-      
+        run: docker build -t ${{ secrets.DOCKER_USERNAME }}/react-app:latest -t ${{ secrets.DOCKER_USERNAME }}/react-app:${{ github.sha }} -f Dockerfile .
+
       - name: Push images to Docker Hub
         run: |
-          docker push cygnetops/react-app:latest
-          docker push cygnetops/react-app:${{ github.sha }}
+          docker push ${{ secrets.DOCKER_USERNAME }}/react-app:latest
+          docker push ${{ secrets.DOCKER_USERNAME }}/react-app:${{ github.sha }}
