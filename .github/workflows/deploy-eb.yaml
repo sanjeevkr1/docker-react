@@ -48,6 +48,11 @@ jobs:
           zip -r deploy.zip . -x "node_modules/*" ".git/*" ".github/*" "build/*" "dist/*" "*.pem" ".env*"
           ls -lh deploy.zip
       
+      - name: Test AWS Credentials
+        run: |
+          aws sts get-caller-identity
+          aws elasticbeanstalk describe-applications
+          
       - name: Deploy to Elastic Beanstalk
         uses: einaregilsson/beanstalk-deploy@v22
         with:
