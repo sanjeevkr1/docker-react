@@ -261,259 +261,321 @@ jobs:
 ### Deploy Workflow (`.github/workflows/deploy.yaml`)
 
 ```yaml
-name: Deploy
-
+name: Deploy to AWS EC2
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
 
 jobs:
   deploy:
-
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v2
-
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v1
+      - uses: actions/checkout@v2
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: 'us-east-1'
-
-      - name: Deploy to EC2
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+      
+      - name: Get EC2 Instance ID by tag
+        id: get-instance
         run: |
-          INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=YOUR_INSTANCE_NAME" --query "Reservations[].Instances[].InstanceId" --output text)
-          PUBLIC_IP=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=YOUR_INSTANCE_NAME" --query "Reservations[].Instances[].PublicIpAddress" --output text)
-          DOMAIN_NAME="yourdomain.com"
+          INSTANCE_ID=$(aws ec2 describe-instances \
+            --filters "Name=tag:instance-name,Values=react-app" "Name=instance-state-name,Values=running" \
+            --query 'Reservations[0].Instances[0].InstanceId' \
+            --output text)
+          echo "instance_id=$INSTANCE_ID" >> $GITHUB_OUTPUT
+          echo "Instance ID: $INSTANCE_ID"
+      
+      - name: Verify AWS credentials
+        run: aws sts get-caller-identity
 
-          # SSH into the instance and pull the latest Docker image
-          ssh -o StrictHostKeyChecking=no -i "YOUR_KEY_PAIR.pem" ec2-user@$PUBLIC_IP << EOF
-            docker pull your_dockerhub_username/your_image_name:latest
-            docker stop frontend || true
-            docker rm frontend || true
-            docker run -d --name frontend -p 80:80 your_dockerhub_username/your_image_name:latest
-          EOF
+      - name: Check and Install Docker
+        run: |
+          ID=${{ steps.get-instance.outputs.instance_id }}
+          echo "Checking Docker installation on instance: $ID"
 
-          # Update Route 53 record
-          HOSTED_ZONE_ID="YOUR_HOSTED_ZONE_ID"
-          CHANGE_BATCH="{\"Changes\":[{\"Action\":\"UPSERT\",\"ResourceRecordSet\":{\"Name\":\"$DOMAIN_NAME\",\"Type\":\"A\",\"TTL\":300,\"ResourceRecords\":[{\"Value\":\"$PUBLIC_IP\"}]}}]}"
-          aws route53 change-resource-record-sets --hosted-zone-id $HOSTED_ZONE_ID --change-batch "$CHANGE_BATCH"
+          DOCKER_CMD_ID=$(aws ssm send-command \
+            --instance-ids "$ID" \
+            --document-name "AWS-RunShellScript" \
+            --parameters file://.github/workflows/ssm-commands/check-docker.json \
+            --query "Command.CommandId" --output text)
+          echo "Docker check/install Command ID: $DOCKER_CMD_ID"
+
+          aws ssm wait command-executed --command-id "$DOCKER_CMD_ID" --instance-id "$ID"
+          
+          DOCKER_STATUS=$(aws ssm get-command-invocation \
+            --command-id "$DOCKER_CMD_ID" \
+            --instance-id "$ID" \
+            --query 'Status' \
+            --output text)
+          
+          echo "Docker command status: $DOCKER_STATUS"
+          aws ssm get-command-invocation --command-id "$DOCKER_CMD_ID" --instance-id "$ID" --output text
+          
+          if [ "$DOCKER_STATUS" != "Success" ]; then
+            echo "ERROR: Docker installation/check failed"
+            exit 1
+          fi
+
+      - name: Pull Docker Image from Docker Hub
+        run: |
+          ID=${{ steps.get-instance.outputs.instance_id }}
+          DOCKER_USER="${{ secrets.DOCKER_USERNAME }}"
+          DEPLOY_PATH="${{ secrets.EC2_DEPLOY_PATH }}"
+
+          echo "Pulling Docker image: $DOCKER_USER/react-app:latest"
+
+          sed "s|\${DOCKER_USER}|$DOCKER_USER|g; s|\${DEPLOY_PATH}|$DEPLOY_PATH|g" \
+            .github/workflows/ssm-commands/pull-image.json > /tmp/pull-image-resolved.json
+
+          PULL_CMD_ID=$(aws ssm send-command \
+            --instance-ids "$ID" \
+            --document-name "AWS-RunShellScript" \
+            --parameters file:///tmp/pull-image-resolved.json \
+            --query "Command.CommandId" --output text)
+          echo "Pull image Command ID: $PULL_CMD_ID"
+
+          aws ssm wait command-executed --command-id "$PULL_CMD_ID" --instance-id "$ID"
+          
+          PULL_STATUS=$(aws ssm get-command-invocation \
+            --command-id "$PULL_CMD_ID" \
+            --instance-id "$ID" \
+            --query 'Status' \
+            --output text)
+          
+          echo "Pull image command status: $PULL_STATUS"
+          aws ssm get-command-invocation --command-id "$PULL_CMD_ID" --instance-id "$ID" --output text
+          
+          if [ "$PULL_STATUS" != "Success" ]; then
+            echo "ERROR: Docker image pull failed"
+            exit 1
+          fi
+
+      - name: Deploy Application Container
+        run: |
+          ID=${{ steps.get-instance.outputs.instance_id }}
+          DOCKER_USER="${{ secrets.DOCKER_USERNAME }}"
+          DEPLOY_PATH="${{ secrets.EC2_DEPLOY_PATH }}"
+
+          echo "Deploying application container"
+
+          sed "s|\${DOCKER_USER}|$DOCKER_USER|g; s|\${DEPLOY_PATH}|$DEPLOY_PATH|g" \
+            .github/workflows/ssm-commands/deploy-app.json > /tmp/deploy-app-resolved.json
+
+          DEPLOY_CMD_ID=$(aws ssm send-command \
+            --instance-ids "$ID" \
+            --document-name "AWS-RunShellScript" \
+            --parameters file:///tmp/deploy-app-resolved.json \
+            --query "Command.CommandId" --output text)
+          echo "Deploy app Command ID: $DEPLOY_CMD_ID"
+
+          aws ssm wait command-executed --command-id "$DEPLOY_CMD_ID" --instance-id "$ID"
+          
+          DEPLOY_STATUS=$(aws ssm get-command-invocation \
+            --command-id "$DEPLOY_CMD_ID" \
+            --instance-id "$ID" \
+            --query 'Status' \
+            --output text)
+          
+          echo "Deploy command status: $DEPLOY_STATUS"
+          aws ssm get-command-invocation --command-id "$DEPLOY_CMD_ID" --instance-id "$ID" --output text
+          
+          if [ "$DEPLOY_STATUS" != "Success" ]; then
+            echo "ERROR: Application deployment failed"
+            exit 1
+          fi
+
+      - name: Sanity Check - Verify App is Running
+        run: |
+          ID=${{ steps.get-instance.outputs.instance_id }}
+
+          echo "Running sanity checks on deployed application"
+
+          SANITY_CMD_ID=$(aws ssm send-command \
+            --instance-ids "$ID" \
+            --document-name "AWS-RunShellScript" \
+            --parameters file://.github/workflows/ssm-commands/sanity-check.json \
+            --query "Command.CommandId" --output text)
+          echo "Sanity check Command ID: $SANITY_CMD_ID"
+
+          aws ssm wait command-executed --command-id "$SANITY_CMD_ID" --instance-id "$ID"
+          
+          SANITY_STATUS=$(aws ssm get-command-invocation \
+            --command-id "$SANITY_CMD_ID" \
+            --instance-id "$ID" \
+            --query 'Status' \
+            --output text)
+          
+          echo "Sanity check status: $SANITY_STATUS"
+          aws ssm get-command-invocation --command-id "$SANITY_CMD_ID" --instance-id "$ID" --output text
+          
+          if [ "$SANITY_STATUS" != "Success" ]; then
+            echo "ERROR: Sanity check failed - application not responding with HTTP 200"
+            exit 1
+          fi
+          
+          echo "✓ All sanity checks passed - application is running and healthy"
 ```
-
-## Deployment Process
-
-1. **Push Code to GitHub**:
-   - Commit and push your code to the `main` branch of your GitHub repository.
-
-2. **GitHub Actions Build**:
-   - On push, the build workflow triggers:
-     - Installs dependencies
-     - Builds the React app
-     - Builds and pushes the Docker image to Docker Hub
-
-3. **GitHub Actions Deploy**:
-   - The deploy workflow triggers:
-     - SSH into the EC2 instance
-     - Pulls the latest Docker image
-     - Stops and removes the old container
-     - Runs the new container
-     - Updates the Route 53 DNS record
-
-4. **Access the Application**:
-   - Once the deployment is complete, access your application using the EC2 public IP or your custom domain.
-
-## Troubleshooting
-
-- **Common Issues**:
-  - If the app doesn't load, check the EC2 instance security group and ensure ports 80, 443, and 22 are open.
-  - For Docker issues, SSH into the EC2 instance and check the Docker logs: `docker logs container_id`.
-
-- **GitHub Actions Failures**:
-  - Check the Actions tab in your GitHub repository for workflow run details.
-  - Ensure all secrets (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, DOCKER_HUB_USERNAME, DOCKER_HUB_ACCESS_TOKEN) are correctly set in the repository settings.
-
-- **Further Debugging**:
-  - Use `aws ssm send-command` to run commands on the EC2 instance for debugging.
-  - Check the Nginx configuration and logs if there are issues with serving the React app.
-
----
-
-By following this tutorial, you should have a React application fully containerized with Docker, and automatically deployed to AWS EC2 using GitHub Actions. This setup ensures a smooth and efficient development to production workflow, leveraging modern tools and best practices.
-
-#### Key Points:
-
-* Builder stage: Node image to build the React app
-* Final stage: Lightweight nginx image to serve the built app
-* Port 80: Application is exposed on HTTP port 80
-
-**nginx.conf**
-
-Configuration for serving the React static files:
+-----------------------------------
+### Deployment Process
+Manual Deployment Steps
+1. **Push code changes to GitHub**
+```python
+    git add .
+    git commit -m "Your commit message"
+    git push origin main
 ```
-### GitHub Repository Setup
-Step 1: Initialize Git Repository
-If not already a git repo:
-````
-Step 2: Create GitHub Repository
-1. Go to GitHub
-2. Create a new repository named docker-react
-3. Do NOT initialize with README, .gitignore, or license
+2. **Trigger Build Workflow**
+* Go to your GitHub repository → Actions
+* Select Build and Push to Docker Hub
+* Click Run workflow → Run workflow
+* Wait for the workflow to complete
+* Verify image pushed to Docker Hub
 
-Step 3: Push to GitHub
+3. **Trigger Deploy Workflow**
+* Go to your GitHub repository → Actions
+* Select Deploy to AWS EC2
+* Click Run workflow → Run workflow
+* Monitor the workflow execution:
+    * ✅ Configure AWS credentials
+    * ✅ Get EC2 Instance ID
+    * ✅ Check and Install Docker
+    * ✅ Pull Docker Image
+    * ✅ Deploy Application Container
+    * ✅ Sanity Check - Verify App is Running
 
-### AWS Configuration
-Step 1: Create EC2 Instance
-1. Go to AWS Console → EC2 Dashboard → Instances
-2. Click Launch instances
-3. Name: react-app
-4. AMI: Select Amazon Linux 2 (or Amazon Linux AMI)
-5. Instance Type: t2.micro (eligible for free tier)
-6. Key Pair:
-    * Create new key pair named react-app-key
-    * Download the .pem file and store safely
-7. Network settings:
-    * Check "Allow HTTP traffic"
-    * Check "Allow HTTPS traffic"
-    * Do NOT allow SSH (we'll use Systems Manager)
-8. Storage: Keep default (8 GB)
-9. Click Launch instance
+4. **Access Your Application**
+* Once deployment is complete, you can access your application at:  http://YOUR_EC2_PUBLIC_IP/
 
-Step 2: Tag Your EC2 Instance
-1. Go to EC2 Dashboard → Instances
-2. Select your instance
-3. Click Tags tab
-4. Click Manage Tags
-5. Add new tag:
-    * Key: instance-name
-    * Value: react-app
-6. Click Save
+**To find your EC2 public IP:**
 
-Step 3: Create IAM Role for EC2
-1. Go to IAM → Roles → Create Role
-2. Select AWS Service → EC2
-3. Search and attach: AmazonSSMManagedInstanceCore
-4. Role name: EC2-SSM-Deploy-Role
-5. Click Create role
+* Go to AWS EC2 Dashboard → Instances
+* Select your react-app instance
+* Copy the Public IPv4 address
 
-Step 4: Attach Role to EC2 Instance
-1. Go to EC2 Dashboard → Instances
-2. Select your instance → Instance Details
-3. Click Security tab
-4.Click the IAM instance profile → Modify IAM Instance Profile
-5. Select EC2-SSM-Deploy-Role
-6. Click Update
-7. Reboot the instance (right-click → Reboot instance)
+**Full Deployment Workflow**
 
-Step 5: Verify SSM Agent
-1. Go to AWS Systems Manager → Session Manager
-2. Click Start session
-3. Select your react-app instance
-4. If successful, you're in a shell on your instance
+    Developer pushes code
+            ↓
+        GitHub Actions
+            ↓
+        Build Workflow
+            ↓
+    Run Tests in Docker
+            ↓
+    Build Production Image
+            ↓
+    Push to Docker Hub
+            ↓
+        Deploy Workflow
+            ↓
+    Get EC2 Instance ID (by tag)
+            ↓
+    Check/Install Docker on EC2
+            ↓
+    Pull Image from Docker Hub
+            ↓
+    Stop Old Container & Start New
+            ↓
+    Run Health Checks
+            ↓
+    App is Live! 🚀
 
-Verify SSM agent:
-```bash
-sudo systemctl status amazon-ssm-agent
+
+-------------------------------------------------------
+### Troubleshooting
+* Issue: GitHub Actions - Credentials could not be loaded
+    * **Cause**: Trust relationship issue with OIDC provider
+
+    * Solution:
+
+        1. Verify OIDC provider exists: IAM → Identity providers
+        2. Check trust relationship includes correct sub pattern
+
+            ` repo:YOUR_USERNAME/docker-react:ref:refs/heads/*`
+        3. Verify AWS_ROLE_ARN secret is correct
+
+    * Issue: Docker command not found on EC2
+        * Cause: Docker not installed or SSM agent not running
+        * Solution:
+            1. Verify SSM agent is running:
+
+                `sudo systemctl status amazon-ssm-agent`
+            2. Check EC2 instance role has AmazonSSMManagedInstanceCore policy
+            3. Verify EC2 instance is tagged correctly: instance-name=react-app
+
+    * Issue: Application returns HTTP 500
+        * Cause: Container exited or app failed to start
+
+        * Solution:
+            1. Check container logs via Systems Manager Session Manager
+                `sudo docker logs react-app`
+            2. Verify nginx.conf is correct
+            3. Check application build completed successfully
+
+    * Issue: Permission Denied - docker: command not found
+        * Cause: Commands running as non-root without sudo
+
+        * Solution: All docker commands use sudo in deployment scripts
+
+    * Issue: EC2 Instance Not Found
+        * Cause: Wrong tag name or instance not running
+
+        * Solution:
+
+            1. Verify instance tag: Name = instance-name, Value = react-app
+            2. Verify instance is in Running state
+            3. Check instance is in same region as workflow
+
+    * Issue: Cannot Push to Docker Hub
+        * Cause: Invalid Docker Hub credentials
+
+        * Solution:
+
+            1. Create Docker Hub personal access token:
+                * Go to Docker Hub → Account Settings → Security
+                * Generate new access token
+            2. Update GitHub secret DOCKER_PASSWORD with token
+            3. Verify username is correct
+
+--------------------------------------------
+### Useful Commands
+**Local Development**
+```python
+    # Install dependencies
+    npm install
+
+    # Start development server
+    npm start
+
+    # Build for production
+    npm run build
+
+    # Run tests
+    npm test
 ```
-If not running:
+**Docker Commands**
+```python
+    # Connect to EC2 via Session Manager
+    aws ssm start-session --target i-INSTANCE_ID
 
-```bash
-sudo systemctl start amazon-ssm-agent
-sudo systemctl enable amazon-ssm-agent
+    # Get EC2 instances
+    aws ec2 describe-instances --query 'Reservations[*].Instances[*].[InstanceId,Tags[?Key==`instance-name`].Value]'
+
+    # View SSM command results
+    aws ssm get-command-invocation --command-id CMD_ID --instance-id i-INSTANCE_ID
 ```
-Step 6: Setup OIDC Provider for GitHub Actions
-1. Go to IAM → Identity providers → Add provider
-2. Provider type: OpenID Connect
-3. Provider URL: https://token.actions.githubusercontent.com
-4. Audience: sts.amazonaws.com
-5. Click Add provider
-
-Step 7: Create IAM Role for GitHub Actions
-1. Go to IAM → Roles → Create Role
-2. Trusted entity type: Web identity
-3. Identity provider: token.actions.githubusercontent.com
-4. Audience: sts.amazonaws.com
-5. Click Next
-6. Role name: GitHubActionsRole
-7. Click Create role (skip adding permissions for now)
-
-Step 8: Add Inline Policy to GitHub Actions Role
-1. Go to IAM → Roles → Select GitHubActionsRole
-2. Click Add permissions → Create inline policy
-3. Select JSON tab
-4. Paste this policy (replace ACCOUNT_ID):
-````
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": [
-        "ec2:DescribeInstances",
-        "ec2:DescribeTags"
-      ],
-      "Resource": "*"
-    },
-    {
-      "Effect": "Allow",
-      "Action": [
-        "ssm:SendCommand"
-      ],
-      "Resource": [
-        "arn:aws:ssm:*::document/*",
-        "arn:aws:ec2:*:ACCOUNT_ID:instance/*"
-      ]
-    },
-    {
-      "Effect": "Allow",
-      "Action": [
-        "ssm:GetCommandInvocation",
-        "ssm:ListCommandInvocations",
-        "ssm:ListCommands"
-      ],
-      "Resource": "*"
-    }
-  ]
-}
-````
-5. Click Review policy → Create policy
-6. Policy name: GitHubActionsPolicy
-
-Step 9: Update Trust Relationship
-1. In GitHubActionsRole, click Trust relationships
-2. Click Edit trust policy
-3. Replace with this (replace ACCOUNT_ID, YOUR_USERNAME, YOUR_REPO):
-````
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Principal": {
-        "Federated": "arn:aws:iam::ACCOUNT_ID:oidc-provider/token.actions.githubusercontent.com"
-      },
-      "Action": "sts:AssumeRoleWithWebIdentity",
-      "Condition": {
-        "StringEquals": {
-          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
-        },
-        "StringLike": {
-          "token.actions.githubusercontent.com:sub": "repo:YOUR_USERNAME/docker-react:ref:refs/heads/*"
-        }
-      }
-    }
-  ]
-}
-````
-4. Click Update policy
----------------------------------------------------
-### GitHub Actions Workflows
-Step 1: Create Workflow Files Structure
-Create the following directory structure:
-````bash
-mkdir -p .github/workflows/ssm-commands
-````
-
+---------------------------------------------
+### Next Steps
+1. **Set up CI/CD pipeline** - Add automatic builds on push
+2. **Use Amazon ECR** - Store images in private ECR registry
+3. **Add monitoring** - CloudWatch logs and alerts
+4. **SSL/TLS** - Use AWS Certificate Manager for HTTPS
+5. **Auto-scaling** - Use Auto Scaling Groups for multiple instances
+6. **Load Balancing** - Use Application Load Balancer
+7. **Database** - Add RDS for persistent data
