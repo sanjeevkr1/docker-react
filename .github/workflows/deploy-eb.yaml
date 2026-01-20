@@ -2,9 +2,9 @@ name: Deploy to AWS Elastic Beanstalk
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
+  # push:
+  #   branches:
+  #     - main
 
 permissions:
   id-token: write
@@ -49,49 +49,74 @@ jobs:
           ls -lh deploy.zip
       
       - name: Upload to S3 and Deploy to Elastic Beanstalk
+        env:
+          ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+          REGION: ${{ secrets.AWS_REGION }}
+          APP_NAME: ${{ secrets.EB_APPLICATION_NAME }}
+          ENV_NAME: ${{ secrets.EB_ENVIRONMENT_NAME }}
         run: |
-          BUCKET_NAME="elasticbeanstalk-${{ secrets.AWS_REGION }}-$(aws sts get-caller-identity --query Account --output text)"
-          VERSION_LABEL="react-app-$(date +%s)-${{ github.sha }}"
+          BUCKET_NAME="elasticbeanstalk-${REGION}-${ACCOUNT_ID}"
+          VERSION_LABEL="react-app-$(date +%s)"
           
-          echo "Creating S3 bucket if not exists..."
-          aws s3api head-bucket --bucket "$BUCKET_NAME" 2>/dev/null || aws s3 mb "s3://$BUCKET_NAME" --region "${{ secrets.AWS_REGION }}"
+          echo "Using S3 bucket: $BUCKET_NAME"
+          echo "Version label: $VERSION_LABEL"
           
-          echo "Uploading to S3..."
-          aws s3 cp deploy.zip "s3://$BUCKET_NAME/$VERSION_LABEL.zip"
+          # Check if bucket exists, create if not
+          if ! aws s3api head-bucket --bucket "$BUCKET_NAME" 2>/dev/null; then
+            echo "Bucket does not exist, creating..."
+            if [ "$REGION" = "us-east-1" ]; then
+              aws s3api create-bucket --bucket "$BUCKET_NAME"
+            else
+              aws s3api create-bucket --bucket "$BUCKET_NAME" --region "$REGION" --create-bucket-configuration LocationConstraint="$REGION"
+            fi
+            sleep 2
+          fi
+          
+          # Block public access
+          aws s3api put-public-access-block \
+            --bucket "$BUCKET_NAME" \
+            --public-access-block-configuration \
+            "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"
+          
+          echo "Uploading deployment package to S3..."
+          aws s3 cp deploy.zip "s3://$BUCKET_NAME/deploys/$VERSION_LABEL.zip" --region "$REGION"
           
           echo "Creating application version..."
           aws elasticbeanstalk create-application-version \
-            --application-name "${{ secrets.EB_APPLICATION_NAME }}" \
+            --application-name "$APP_NAME" \
             --version-label "$VERSION_LABEL" \
-            --source-bundle S3Bucket="$BUCKET_NAME",S3Key="$VERSION_LABEL.zip" \
-            --region "${{ secrets.AWS_REGION }}"
+            --source-bundle "S3Bucket=$BUCKET_NAME,S3Key=deploys/$VERSION_LABEL.zip" \
+            --region "$REGION"
           
           echo "Updating environment..."
           aws elasticbeanstalk update-environment \
-            --application-name "${{ secrets.EB_APPLICATION_NAME }}" \
-            --environment-name "${{ secrets.EB_ENVIRONMENT_NAME }}" \
+            --application-name "$APP_NAME" \
+            --environment-name "$ENV_NAME" \
             --version-label "$VERSION_LABEL" \
-            --region "${{ secrets.AWS_REGION }}"
+            --region "$REGION"
       
       - name: Wait for Beanstalk environment to be healthy
+        env:
+          ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+          REGION: ${{ secrets.AWS_REGION }}
+          APP_NAME: ${{ secrets.EB_APPLICATION_NAME }}
+          ENV_NAME: ${{ secrets.EB_ENVIRONMENT_NAME }}
         run: |
-          ENVIRONMENT_NAME="${{ secrets.EB_ENVIRONMENT_NAME }}"
-          APPLICATION_NAME="${{ secrets.EB_APPLICATION_NAME }}"
           MAX_ATTEMPTS=60
           ATTEMPT=1
           
           while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
             HEALTH=$(aws elasticbeanstalk describe-environments \
-              --application-name "$APPLICATION_NAME" \
-              --environment-names "$ENVIRONMENT_NAME" \
-              --region "${{ secrets.AWS_REGION }}" \
+              --application-name "$APP_NAME" \
+              --environment-names "$ENV_NAME" \
+              --region "$REGION" \
               --query 'Environments[0].Health' \
               --output text)
             
             STATUS=$(aws elasticbeanstalk describe-environments \
-              --application-name "$APPLICATION_NAME" \
-              --environment-names "$ENVIRONMENT_NAME" \
-              --region "${{ secrets.AWS_REGION }}" \
+              --application-name "$APP_NAME" \
+              --environment-names "$ENV_NAME" \
+              --region "$REGION" \
               --query 'Environments[0].Status' \
               --output text)
             
@@ -110,11 +135,16 @@ jobs:
           exit 1
       
       - name: Get Beanstalk environment URL
+        env:
+          ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+          REGION: ${{ secrets.AWS_REGION }}
+          APP_NAME: ${{ secrets.EB_APPLICATION_NAME }}
+          ENV_NAME: ${{ secrets.EB_ENVIRONMENT_NAME }}
         run: |
           ENVIRONMENT_URL=$(aws elasticbeanstalk describe-environments \
-            --application-name "${{ secrets.EB_APPLICATION_NAME }}" \
-            --environment-names "${{ secrets.EB_ENVIRONMENT_NAME }}" \
-            --region "${{ secrets.AWS_REGION }}" \
+            --application-name "$APP_NAME" \
+            --environment-names "$ENV_NAME" \
+            --region "$REGION" \
             --query 'Environments[0].CNAME' \
             --output text)
           
