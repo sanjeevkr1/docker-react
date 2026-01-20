@@ -48,22 +48,24 @@ jobs:
           zip -r deploy.zip . -x "node_modules/*" ".git/*" ".github/*" "build/*" "dist/*" "*.pem" ".env*"
           ls -lh deploy.zip
       
-      - name: Test AWS Credentials
+      - name: Upload to S3 and Deploy to Elastic Beanstalk
         run: |
-          aws sts get-caller-identity
-          aws elasticbeanstalk describe-applications
+          BUCKET_NAME="elasticbeanstalk-${{ secrets.AWS_REGION }}-$(aws sts get-caller-identity --query Account --output text)"
+          VERSION_LABEL="react-app-${{ github.sha }}"
           
-      - name: Deploy to Elastic Beanstalk
-        uses: einaregilsson/beanstalk-deploy@v22
-        with:
-          aws_access_key: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          application_name: ${{ secrets.EB_APPLICATION_NAME }}
-          environment_name: ${{ secrets.EB_ENVIRONMENT_NAME }}
-          version_label: "react-app-${{ github.sha }}"
-          region: ${{ secrets.AWS_REGION }}
-          deployment_package: deploy.zip
-          use_existing_version_if_available: false
+          aws s3 cp deploy.zip "s3://$BUCKET_NAME/$VERSION_LABEL.zip"
+          
+          aws elasticbeanstalk create-application-version \
+            --application-name "${{ secrets.EB_APPLICATION_NAME }}" \
+            --version-label "$VERSION_LABEL" \
+            --source-bundle S3Bucket="$BUCKET_NAME",S3Key="$VERSION_LABEL.zip" \
+            --region "${{ secrets.AWS_REGION }}" || true
+          
+          aws elasticbeanstalk update-environment \
+            --application-name "${{ secrets.EB_APPLICATION_NAME }}" \
+            --environment-name "${{ secrets.EB_ENVIRONMENT_NAME }}" \
+            --version-label "$VERSION_LABEL" \
+            --region "${{ secrets.AWS_REGION }}"
       
       - name: Wait for Beanstalk environment to be healthy
         run: |
