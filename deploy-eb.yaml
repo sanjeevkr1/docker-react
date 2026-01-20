@@ -1,0 +1,102 @@
+name: Deploy to AWS Elastic Beanstalk
+
+on:
+  workflow_dispatch:
+  # push:
+  #   branches:
+  #     - main
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v2
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+      
+      - name: Create Elastic Beanstalk Dockerrun.aws.json
+        run: |
+          cat > Dockerrun.aws.json <<EOF
+          {
+            "AWSEBDockerrunVersion": "1",
+            "Image": {
+              "Name": "react-app:latest",
+              "Update": "true"
+            },
+            "Ports": [
+              {
+                "ContainerPort": 80,
+                "HostPort": 80
+              }
+            ],
+            "Logging": "/var/log"
+          }
+          EOF
+          cat Dockerrun.aws.json
+      
+      - name: Generate deployment package
+        run: |
+          zip -r deploy.zip . -x "node_modules/*" ".git/*" ".github/*" "build/*" "dist/*" "*.pem" ".env*"
+          ls -lh deploy.zip
+      
+      - name: Deploy to Elastic Beanstalk
+        uses: einaregilsson/beanstalk-deploy@v22
+        with:
+          aws_access_key: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          application_name: ${{ secrets.EB_APPLICATION_NAME }}
+          environment_name: ${{ secrets.EB_ENVIRONMENT_NAME }}
+          version_label: "react-app-${{ github.sha }}"
+          region: ${{ secrets.AWS_REGION }}
+          deployment_package: deploy.zip
+          use_existing_version_if_available: false
+      
+      - name: Wait for Beanstalk environment to be healthy
+        run: |
+          ENVIRONMENT_NAME="${{ secrets.EB_ENVIRONMENT_NAME }}"
+          APPLICATION_NAME="${{ secrets.EB_APPLICATION_NAME }}"
+          MAX_ATTEMPTS=60
+          ATTEMPT=1
+          
+          while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+            HEALTH=$(aws elasticbeanstalk describe-environments \
+              --application-name "$APPLICATION_NAME" \
+              --environment-names "$ENVIRONMENT_NAME" \
+              --region "${{ secrets.AWS_REGION }}" \
+              --query 'Environments[0].Health' \
+              --output text)
+            
+            echo "Attempt $ATTEMPT/$MAX_ATTEMPTS - Health Status: $HEALTH"
+            
+            if [ "$HEALTH" = "Green" ]; then
+              echo "✓ Environment is healthy"
+              exit 0
+            fi
+            
+            sleep 5
+            ATTEMPT=$((ATTEMPT + 1))
+          done
+          
+          echo "✗ Environment health check timeout"
+          exit 1
+      
+      - name: Get Beanstalk environment URL
+        run: |
+          ENVIRONMENT_URL=$(aws elasticbeanstalk describe-environments \
+            --application-name "${{ secrets.EB_APPLICATION_NAME }}" \
+            --environment-names "${{ secrets.EB_ENVIRONMENT_NAME }}" \
+            --region "${{ secrets.AWS_REGION }}" \
+            --query 'Environments[0].CNAME' \
+            --output text)
+          
+          echo "Environment URL: http://$ENVIRONMENT_URL"
+          echo "✓ Deployment completed successfully!"

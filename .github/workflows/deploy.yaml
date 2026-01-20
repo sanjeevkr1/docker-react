@@ -1,14 +1,14 @@
 name: Deploy to AWS EC2
 on:
   workflow_dispatch:
-  # push:
-  #   branches:
-  #     - master
+
+permissions:
+  id-token: write
+  contents: read
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     steps:
       - uses: actions/checkout@v2
       
@@ -28,45 +28,134 @@ jobs:
           echo "instance_id=$INSTANCE_ID" >> $GITHUB_OUTPUT
           echo "Instance ID: $INSTANCE_ID"
       
-      - name: Deploy to EC2 via Systems Manager
+      - name: Verify AWS credentials
+        run: aws sts get-caller-identity
+
+      - name: Check and Install Docker
         run: |
-          aws ssm send-command \
-            --instance-ids ${{ steps.get-instance.outputs.instance_id }} \
+          ID=${{ steps.get-instance.outputs.instance_id }}
+          echo "Checking Docker installation on instance: $ID"
+
+          DOCKER_CMD_ID=$(aws ssm send-command \
+            --instance-ids "$ID" \
             --document-name "AWS-RunShellScript" \
-            --parameters 'commands=[
-              "cd ${{ secrets.EC2_DEPLOY_PATH }}",
-              "docker login -u ${{ secrets.DOCKER_USERNAME }} -p ${{ secrets.DOCKER_PASSWORD }}",
-              "docker pull ${{ secrets.DOCKER_USERNAME }}/react-app:latest",
-              "docker stop react-app || true",
-              "docker rm react-app || true",
-              "docker run -d --name react-app -p 80:80 ${{ secrets.DOCKER_USERNAME }}/react-app:latest",
-              "docker logs react-app"
-            ]' \
-            --output text
-      
-      - name: Wait for command to complete
-        run: |
-          COMMAND_ID=$(aws ssm list-commands \
-            --filters "key=DocumentName,value=AWS-RunShellScript" \
-            --query 'Commands[0].CommandId' \
+            --parameters file://.github/workflows/ssm-commands/check-docker.json \
+            --query "Command.CommandId" --output text)
+          echo "Docker check/install Command ID: $DOCKER_CMD_ID"
+
+          aws ssm wait command-executed --command-id "$DOCKER_CMD_ID" --instance-id "$ID"
+          
+          DOCKER_STATUS=$(aws ssm get-command-invocation \
+            --command-id "$DOCKER_CMD_ID" \
+            --instance-id "$ID" \
+            --query 'Status' \
             --output text)
           
-          for i in {1..30}; do
-            STATUS=$(aws ssm get-command-invocation \
-              --command-id $COMMAND_ID \
-              --instance-id ${{ steps.get-instance.outputs.instance_id }} \
-              --query 'Status' \
-              --output text)
-            
-            if [ "$STATUS" = "Success" ]; then
-              echo "Deployment successful"
-              exit 0
-            elif [ "$STATUS" = "Failed" ]; then
-              echo "Deployment failed"
-              exit 1
-            fi
-            
-            sleep 2
-          done
-          echo "Deployment timeout"
-          exit 1
+          echo "Docker command status: $DOCKER_STATUS"
+          aws ssm get-command-invocation --command-id "$DOCKER_CMD_ID" --instance-id "$ID" --output text
+          
+          if [ "$DOCKER_STATUS" != "Success" ]; then
+            echo "ERROR: Docker installation/check failed"
+            exit 1
+          fi
+
+      - name: Pull Docker Image from Docker Hub
+        run: |
+          ID=${{ steps.get-instance.outputs.instance_id }}
+          DOCKER_USER="${{ secrets.DOCKER_USERNAME }}"
+          DEPLOY_PATH="${{ secrets.EC2_DEPLOY_PATH }}"
+
+          echo "Pulling Docker image: $DOCKER_USER/react-app:latest"
+
+          # Substitute variables in the command file
+          sed "s|\${DOCKER_USER}|$DOCKER_USER|g; s|\${DEPLOY_PATH}|$DEPLOY_PATH|g" \
+            .github/workflows/ssm-commands/pull-image.json > /tmp/pull-image-resolved.json
+
+          PULL_CMD_ID=$(aws ssm send-command \
+            --instance-ids "$ID" \
+            --document-name "AWS-RunShellScript" \
+            --parameters file:///tmp/pull-image-resolved.json \
+            --query "Command.CommandId" --output text)
+          echo "Pull image Command ID: $PULL_CMD_ID"
+
+          aws ssm wait command-executed --command-id "$PULL_CMD_ID" --instance-id "$ID"
+          
+          PULL_STATUS=$(aws ssm get-command-invocation \
+            --command-id "$PULL_CMD_ID" \
+            --instance-id "$ID" \
+            --query 'Status' \
+            --output text)
+          
+          echo "Pull image command status: $PULL_STATUS"
+          aws ssm get-command-invocation --command-id "$PULL_CMD_ID" --instance-id "$ID" --output text
+          
+          if [ "$PULL_STATUS" != "Success" ]; then
+            echo "ERROR: Docker image pull failed"
+            exit 1
+          fi
+
+      - name: Deploy Application Container
+        run: |
+          ID=${{ steps.get-instance.outputs.instance_id }}
+          DOCKER_USER="${{ secrets.DOCKER_USERNAME }}"
+          DEPLOY_PATH="${{ secrets.EC2_DEPLOY_PATH }}"
+
+          echo "Deploying application container"
+
+          # Substitute variables in the command file
+          sed "s|\${DOCKER_USER}|$DOCKER_USER|g; s|\${DEPLOY_PATH}|$DEPLOY_PATH|g" \
+            .github/workflows/ssm-commands/deploy-app.json > /tmp/deploy-app-resolved.json
+
+          DEPLOY_CMD_ID=$(aws ssm send-command \
+            --instance-ids "$ID" \
+            --document-name "AWS-RunShellScript" \
+            --parameters file:///tmp/deploy-app-resolved.json \
+            --query "Command.CommandId" --output text)
+          echo "Deploy app Command ID: $DEPLOY_CMD_ID"
+
+          aws ssm wait command-executed --command-id "$DEPLOY_CMD_ID" --instance-id "$ID"
+          
+          DEPLOY_STATUS=$(aws ssm get-command-invocation \
+            --command-id "$DEPLOY_CMD_ID" \
+            --instance-id "$ID" \
+            --query 'Status' \
+            --output text)
+          
+          echo "Deploy command status: $DEPLOY_STATUS"
+          aws ssm get-command-invocation --command-id "$DEPLOY_CMD_ID" --instance-id "$ID" --output text
+          
+          if [ "$DEPLOY_STATUS" != "Success" ]; then
+            echo "ERROR: Application deployment failed"
+            exit 1
+          fi
+
+      - name: Sanity Check - Verify App is Running
+        run: |
+          ID=${{ steps.get-instance.outputs.instance_id }}
+
+          echo "Running sanity checks on deployed application"
+
+          SANITY_CMD_ID=$(aws ssm send-command \
+            --instance-ids "$ID" \
+            --document-name "AWS-RunShellScript" \
+            --parameters file://.github/workflows/ssm-commands/sanity-check.json \
+            --query "Command.CommandId" --output text)
+          echo "Sanity check Command ID: $SANITY_CMD_ID"
+
+          aws ssm wait command-executed --command-id "$SANITY_CMD_ID" --instance-id "$ID"
+          
+          SANITY_STATUS=$(aws ssm get-command-invocation \
+            --command-id "$SANITY_CMD_ID" \
+            --instance-id "$ID" \
+            --query 'Status' \
+            --output text)
+          
+          echo "Sanity check status: $SANITY_STATUS"
+          aws ssm get-command-invocation --command-id "$SANITY_CMD_ID" --instance-id "$ID" --output text
+          
+          if [ "$SANITY_STATUS" != "Success" ]; then
+            echo "ERROR: Sanity check failed - application not responding with HTTP 200"
+            exit 1
+          fi
+          
+          echo "✓ All sanity checks passed - application is running and healthy"

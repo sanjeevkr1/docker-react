@@ -1,0 +1,16 @@
+{
+  "commands": [
+    "#!/bin/bash -xe",
+    "set -o pipefail",
+    "cd ${DEPLOY_PATH} || exit 1",
+    "echo 'Stopping existing container...'",
+    "sudo docker stop react-app || true",
+    "sudo docker rm react-app || true",
+    "echo 'Starting new container...'",
+    "sudo docker run -d --name react-app -p 80:80 ${DOCKER_USER}/react-app:latest",
+    "sleep 2",
+    "echo 'Container started, checking status...'",
+    "sudo docker ps | grep react-app",
+    "echo 'Application deployed successfully'"
+  ]
+}
