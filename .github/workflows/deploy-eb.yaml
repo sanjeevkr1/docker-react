@@ -2,9 +2,9 @@ name: Deploy to AWS Elastic Beanstalk
 
 on:
   workflow_dispatch:
-  # push:
-  #   branches:
-  #     - main
+  push:
+    branches:
+      - main
 
 permissions:
   id-token: write
@@ -51,16 +51,22 @@ jobs:
       - name: Upload to S3 and Deploy to Elastic Beanstalk
         run: |
           BUCKET_NAME="elasticbeanstalk-${{ secrets.AWS_REGION }}-$(aws sts get-caller-identity --query Account --output text)"
-          VERSION_LABEL="react-app-${{ github.sha }}"
+          VERSION_LABEL="react-app-$(date +%s)-${{ github.sha }}"
           
+          echo "Creating S3 bucket if not exists..."
+          aws s3api head-bucket --bucket "$BUCKET_NAME" 2>/dev/null || aws s3 mb "s3://$BUCKET_NAME" --region "${{ secrets.AWS_REGION }}"
+          
+          echo "Uploading to S3..."
           aws s3 cp deploy.zip "s3://$BUCKET_NAME/$VERSION_LABEL.zip"
           
+          echo "Creating application version..."
           aws elasticbeanstalk create-application-version \
             --application-name "${{ secrets.EB_APPLICATION_NAME }}" \
             --version-label "$VERSION_LABEL" \
             --source-bundle S3Bucket="$BUCKET_NAME",S3Key="$VERSION_LABEL.zip" \
-            --region "${{ secrets.AWS_REGION }}" || true
+            --region "${{ secrets.AWS_REGION }}"
           
+          echo "Updating environment..."
           aws elasticbeanstalk update-environment \
             --application-name "${{ secrets.EB_APPLICATION_NAME }}" \
             --environment-name "${{ secrets.EB_ENVIRONMENT_NAME }}" \
@@ -82,10 +88,17 @@ jobs:
               --query 'Environments[0].Health' \
               --output text)
             
-            echo "Attempt $ATTEMPT/$MAX_ATTEMPTS - Health Status: $HEALTH"
+            STATUS=$(aws elasticbeanstalk describe-environments \
+              --application-name "$APPLICATION_NAME" \
+              --environment-names "$ENVIRONMENT_NAME" \
+              --region "${{ secrets.AWS_REGION }}" \
+              --query 'Environments[0].Status' \
+              --output text)
             
-            if [ "$HEALTH" = "Green" ]; then
-              echo "✓ Environment is healthy"
+            echo "Attempt $ATTEMPT/$MAX_ATTEMPTS - Status: $STATUS, Health: $HEALTH"
+            
+            if [ "$HEALTH" = "Green" ] && [ "$STATUS" = "Ready" ]; then
+              echo "✓ Environment is healthy and ready"
               exit 0
             fi
             
